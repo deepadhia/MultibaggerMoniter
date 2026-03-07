@@ -1,0 +1,35 @@
+name: The Daily Watchdog
+
+on:
+  schedule:
+    # Runs at 12:30 UTC => 18:00 IST every weekday (Monday-Friday)
+    - cron: '30 12 * * 1-5'
+  workflow_dispatch: # allow manual triggering
+
+jobs:
+  run-watchdog:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (v20+)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Compile TypeScript
+        run: npm run build
+
+      - name: Run Main Orchestration Script
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: npm start
