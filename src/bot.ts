@@ -11,14 +11,9 @@ export const bot = BOT_TOKEN ? new Telegraf(BOT_TOKEN) : null;
 
 export const sendTelegramAlert = async (message: string) => {
   if (!bot || !CHAT_ID) {
-    console.error('Cannot send Telegram alert: BOT_TOKEN or CHAT_ID is missing');
-    return;
+    throw new Error('Cannot send Telegram alert: BOT_TOKEN or CHAT_ID is missing');
   }
   
-  try {
-    await bot.telegram.sendMessage(CHAT_ID, message, { parse_mode: 'Markdown' });
-    console.log('Telegram alert sent successfully');
-  } catch (error) {
-    console.error('Error sending Telegram alert:', error);
-  }
+  await bot.telegram.sendMessage(CHAT_ID, message, { parse_mode: 'Markdown' });
+  console.log('Telegram alert sent successfully');
 };

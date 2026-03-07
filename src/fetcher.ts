@@ -1,46 +1,79 @@
 import axios from 'axios';
-import { wrapper } from 'axios-cookiejar-support';
-import { CookieJar } from 'tough-cookie';
+import https from 'https';
 
-const jar = new CookieJar();
-const client = wrapper(axios.create({ jar }));
+const NSE_BASE = 'https://www.nseindia.com';
 
-const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
-
-const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-export const fetchCorporateAnnouncements = async (index: string = 'equities') => {
-  try {
-    // Step 1: Hit base URL to bypass WAF and grab session cookies
-    console.log('Fetching session cookies from NSE...');
-    await client.get('https://www.nseindia.com', {
-      headers: {
-        'User-Agent': USER_AGENT,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-      }
-    });
-
-    // Step 2: Implement a randomized 2 to 5-second delay
-    const waitTime = Math.floor(Math.random() * 3000) + 2000;
-    console.log(`Waiting for ${waitTime}ms to simulate human behavior...`);
-    await delay(waitTime);
-
-    // Step 3: Fetch the corporate announcements API with the cookies
-    console.log('Fetching corporate announcements...');
-    const response = await client.get('https://www.nseindia.com/api/corporate-announcements', {
-      params: { index },
-      headers: {
-        'User-Agent': USER_AGENT,
-        'Accept': '*/*',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Referer': 'https://www.nseindia.com/'
-      }
-    });
-
-    return response.data;
-  } catch (error) {
-    console.error('Error fetching data from NSE API:', error);
-    throw error;
-  }
+// Enhanced headers to perfectly mimic a real browser session
+const defaultHeaders = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+  'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8',
+  'Accept-Encoding': 'gzip, deflate, br',
+  'Connection': 'keep-alive',
+  'Upgrade-Insecure-Requests': '1',
+  'Sec-Fetch-Dest': 'document',
+  'Sec-Fetch-Mode': 'navigate',
+  'Sec-Fetch-Site': 'none',
+  'Sec-Fetch-User': '?1',
+  'Cache-Control': 'max-age=0'
 };
+
+// Use a custom HTTPS agent to mimic browser TLS behavior
+const httpsAgent = new https.Agent({
+  rejectUnauthorized: false,
+  keepAlive: true,
+});
+
+export async function fetchAnnouncements() {
+  try {
+    console.log("Step 1: Pinging NSE base URL for cookies...");
+    
+    const initRes = await axios.get(NSE_BASE, { 
+        headers: defaultHeaders,
+        httpsAgent,
+        timeout: 15000 
+    });
+    
+    // Extract the raw cookie string directly from the headers
+    const rawCookies = initRes.headers['set-cookie'];
+    const cookieString = rawCookies ? rawCookies.map((c: string) => c.split(';')[0]).join('; ') : '';
+    
+    if (!cookieString) {
+        throw new Error("Failed to extract session cookies from NSE.");
+    }
+
+    console.log("Step 2: Cookies secured. Waiting 3-5 seconds to bypass WAF...");
+    const waitTime = Math.floor(Math.random() * 2000) + 3000;
+    await new Promise(resolve => setTimeout(resolve, waitTime));
+
+    console.log("Step 3: Fetching Corporate Announcements...");
+    const apiRes = await axios.get(`${NSE_BASE}/api/corporate-announcements?index=equities`, {
+      headers: {
+        ...defaultHeaders,
+        'Accept': '*/*',
+        'Cookie': cookieString,
+        'X-Requested-With': 'XMLHttpRequest', // Crucial for NSE API
+        'Referer': `${NSE_BASE}/`,
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin'
+      },
+      httpsAgent,
+      timeout: 15000
+    });
+
+    console.log(`✅ Successfully fetched ${apiRes.data.length} recent announcements.`);
+    
+    // Return the raw array for your worker.ts to filter
+    return apiRes.data; 
+
+  } catch (error: any) {
+    console.error("❌ NSE Fetch failed:");
+    console.error(error.message);
+    if (error.response) {
+      console.error(`Status: ${error.response.status}`);
+      console.error(`Headers:`, error.response.headers);
+    }
+    return [];
+  }
+}

@@ -1,54 +1,114 @@
+import 'dotenv/config';
 import { connectDB, Watchlist, IWatchlist } from './db';
-import { fetchCorporateAnnouncements } from './fetcher';
+import { fetchAnnouncements } from './fetcher';
 import { sendTelegramAlert } from './bot';
 import { processQuarterlyFilings } from './ai';
 
+// These are the REAL field names from the NSE API (verified via smoke test)
+interface NSEAnnouncement {
+  symbol: string;
+  desc: string;           // announcement subject/description
+  dt: string;             // date
+  attchmntFile: string;   // PDF attachment URL
+  sm_name: string;        // company name
+  sm_isin: string;
+  an_dt: string;
+  sort_date: string;
+  seq_id: string;
+  smIndustry: string;
+  orgid: string;
+  attchmntText: string;
+  exchdisstime: string;
+}
+
+// Subjects we care about — matched against the `desc` field
+const IMPORTANT_SUBJECTS = [
+  'Financial Results',
+  'Earnings Call Transcript',
+  'Shareholding Pattern',
+  'Updates',
+  'General Updates',
+];
+
+const isImportantSubject = (desc: string): boolean => {
+  return IMPORTANT_SUBJECTS.some(s => desc?.toLowerCase().includes(s.toLowerCase()));
+};
+
 const processAnnouncements = async (watchlistDocs: IWatchlist[]) => {
   try {
-    const data = await fetchCorporateAnnouncements();
-    const announcements = data?.data || [];
-    
-    // Group announcements by ticker
-    const announcementsByTicker: Record<string, any[]> = {};
-    for (const ann of announcements) {
-      if (ann.symbol) {
-        if (!announcementsByTicker[ann.symbol]) announcementsByTicker[ann.symbol] = [];
-        announcementsByTicker[ann.symbol].push(ann);
-      }
+    // NSE returns a flat array — NOT { data: [...] }
+    const announcements: NSEAnnouncement[] = await fetchAnnouncements();
+
+    if (!Array.isArray(announcements) || announcements.length === 0) {
+      console.log('No announcements found.');
+      return;
+    }
+
+    console.log(`Fetched ${announcements.length} total announcements from NSE.`);
+
+    const watchlistTickers = watchlistDocs.map(d => d.ticker);
+
+    // Filter: only our watchlist stocks + important subjects (using `desc` field)
+    const relevant = announcements.filter(ann =>
+      watchlistTickers.includes(ann.symbol) && isImportantSubject(ann.desc)
+    );
+
+    console.log(`${relevant.length} relevant announcements for our watchlist.`);
+
+    // Group relevant announcements by ticker
+    const byTicker: Record<string, NSEAnnouncement[]> = {};
+    for (const ann of relevant) {
+      if (!byTicker[ann.symbol]) byTicker[ann.symbol] = [];
+      byTicker[ann.symbol].push(ann);
     }
 
     for (const doc of watchlistDocs) {
-      const { ticker, masterPrompt, mCapThreshold } = doc;
-      const tickerAnnouncements = announcementsByTicker[ticker];
-      if (!tickerAnnouncements || tickerAnnouncements.length === 0) continue;
+      const { ticker, masterPrompt } = doc;
+      const tickerAnns = byTicker[ticker];
+      if (!tickerAnns) continue;
 
       let financialResultsUrl: string | null = null;
       let transcriptUrl: string | null = null;
 
-      for (const ann of tickerAnnouncements) {
-        const subject = ann.subject?.toLowerCase() || '';
-        const attachmentUrl = ann.attachment ? `https://www.nseindia.com${ann.attachment}` : null;
+      for (const ann of tickerAnns) {
+        const desc = ann.desc || '';
 
-        // Condition 1: SAST or Bulk Deal
-        if (subject.includes('sast') || subject.includes('bulk deal') || subject.includes('insider')) {
-          const alertMessage = `🔥 *High Signal Alert: ${ticker}* 🔥\n\n*Subject:* ${ann.subject}\n*Details:* ${ann.details || 'N/A'}\n[Attachment](${attachmentUrl})`;
-          await sendTelegramAlert(alertMessage);
+        // ── Insider Trades / Block Deals (hide in "Updates") ──
+        if (desc.toLowerCase().includes('updates')) {
+          const detail = (ann.attchmntText || '').toLowerCase();
+          if (detail.includes('sast') || detail.includes('bulk deal') || detail.includes('insider') || detail.includes('block deal')) {
+            const alertMsg =
+              `🔥 *Insider/Block Deal Alert: ${ticker}* 🔥\n\n` +
+              `*Subject:* ${desc}\n` +
+              `*Company:* ${ann.sm_name}\n` +
+              `[📎 Attachment](${ann.attchmntFile})`;
+            await sendTelegramAlert(alertMsg);
+          }
         }
 
-        // Condition 2: Financial Results & Transcripts
-        if (subject.includes('financial result')) {
-          financialResultsUrl = attachmentUrl;
-        } else if (subject.includes('transcript') || subject.includes('earnings call')) {
-          transcriptUrl = attachmentUrl;
+        // ── Shareholding Pattern ──
+        if (desc.toLowerCase().includes('shareholding pattern')) {
+          const alertMsg =
+            `📊 *Shareholding Update: ${ticker}*\n\n` +
+            `*Company:* ${ann.sm_name}\n` +
+            `[📎 View Pattern](${ann.attchmntFile})`;
+          await sendTelegramAlert(alertMsg);
+        }
+
+        // ── Financial Results & Transcript (for Gemini analysis) ──
+        if (desc.toLowerCase().includes('financial results')) {
+          financialResultsUrl = ann.attchmntFile;
+        }
+        if (desc.toLowerCase().includes('transcript')) {
+          transcriptUrl = ann.attchmntFile;
         }
       }
 
-      // If we found both Financial Results and Earnings Transcript today
+      // If BOTH Financial Results and Transcript are available → trigger AI engine
       if (financialResultsUrl && transcriptUrl) {
-        // Construct a quarter string for right now (e.g. Q4_2026) -> A generic timestamp based quarter
-        const currentDate = new Date();
-        const quarterStr = `Q${Math.floor((currentDate.getMonth() + 3) / 3)}_${currentDate.getFullYear()}`;
-        
+        const now = new Date();
+        const quarterStr = `Q${Math.ceil((now.getMonth() + 1) / 3)}_${now.getFullYear()}`;
+        console.log(`Triggering AI analysis for ${ticker} (${quarterStr})...`);
         await processQuarterlyFilings(ticker, masterPrompt, financialResultsUrl, transcriptUrl, quarterStr);
       }
     }
@@ -58,7 +118,7 @@ const processAnnouncements = async (watchlistDocs: IWatchlist[]) => {
 };
 
 const main = async () => {
-  console.log('Starting Daily Watchdog...');
+  console.log('🚀 Starting The Daily Watchdog...');
 
   const mongoUri = process.env.MONGODB_URI;
   if (!mongoUri) {
@@ -68,18 +128,18 @@ const main = async () => {
 
   await connectDB(mongoUri);
 
-  // Grab active tickers with market cap threshold >= 5000 (enforce Golden Rule)
+  // Enforce The Golden Rule: M-Cap >= ₹5,000 Crore
   const activeWatchlist = await Watchlist.find({ isActive: true, mCapThreshold: { $gte: 5000 } }).exec();
-  
+
   if (activeWatchlist.length === 0) {
-    console.log('No active tickers in watchlist meeting the >= 5000 M-Cap rule. Exiting...');
+    console.log('No active tickers meeting the ₹5,000 Cr M-Cap rule. Exiting...');
     process.exit(0);
   }
 
-  console.log(`Found ${activeWatchlist.length} active tickers. Checking announcements...`);
+  console.log(`Found ${activeWatchlist.length} active ticker(s): ${activeWatchlist.map(w => w.ticker).join(', ')}`);
   await processAnnouncements(activeWatchlist);
 
-  console.log('Daily Watchdog loop completed.');
+  console.log('✅ Daily Watchdog complete.');
   process.exit(0);
 };
 
