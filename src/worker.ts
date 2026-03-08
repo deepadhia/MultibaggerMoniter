@@ -22,9 +22,16 @@ interface NSEAnnouncement {
 }
 
 // Subjects we care about — matched against the `desc` field
+// These are the REAL strings NSE uses (verified from live API inspection)
 const IMPORTANT_SUBJECTS = [
-  'Financial Results',
+  'Financial Result',
+  'Outcome of Board',                   // NSE wraps quarterly results under this
+  'Integrated Filing',                  // e.g. "Integrated Filing- Financial"
   'Earnings Call Transcript',
+  'Con. Call',                          // e.g. "Analysts/Institutional Investor Meet/Con. Call Updates"
+  'Institutional Investor Meet',        // Concall transcript subject on NSE
+  'Analyst',                            // Analyst meet / investor meet
+  'Investor Presentation',              // Fallback if no transcript exists
   'Shareholding Pattern',
   'Updates',
   'General Updates',
@@ -105,11 +112,15 @@ const processAnnouncements = async (watchlistDocs: IWatchlist[]) => {
       }
 
       // If BOTH Financial Results and Transcript are available → trigger AI engine
+      // masterPrompt can be empty — ai.ts will use DEFAULT_MASTER_PROMPT as fallback
       if (financialResultsUrl && transcriptUrl) {
         const now = new Date();
-        const quarterStr = `Q${Math.ceil((now.getMonth() + 1) / 3)}_${now.getFullYear()}`;
+        const quarterStr = `Q${Math.ceil((now.getMonth() + 1) / 3)}_FY${now.getFullYear().toString().slice(2)}`;
         console.log(`Triggering AI analysis for ${ticker} (${quarterStr})...`);
-        await processQuarterlyFilings(ticker, masterPrompt, financialResultsUrl, transcriptUrl, quarterStr);
+        await processQuarterlyFilings(ticker, doc.companyName, masterPrompt || '', financialResultsUrl, transcriptUrl, quarterStr);
+      } else if (financialResultsUrl && !transcriptUrl) {
+        // Results available but no transcript yet — alert user to expect transcript soon
+        console.log(`⚠️  ${ticker}: Results PDF found but no transcript yet. Waiting for next run.`);
       }
     }
   } catch (error) {
